@@ -1,7 +1,7 @@
 using UnityEngine;
 using UnityEngine.InputSystem; // New Input System用
 
-public class LbmController : MonoBehaviour
+public class LbmController2D : MonoBehaviour
 {
     [Header("Shader References")]
     [SerializeField] private ComputeShader lbmSolver;
