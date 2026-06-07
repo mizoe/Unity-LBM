@@ -1,25 +1,27 @@
 #pragma kernel UpdateParticles
 
-struct Particle {
-    float3 position;
+struct Particle
+{
+    float3 pos0, pos1, pos2, pos3, pos4;
     float3 velocity;
     float life;
 };
 
-// 粒子のデータを読み書きするバッファ
 RWStructuredBuffer<Particle> particles;
-
-// LbmSolver3Dが書き込んだ流体データ
 Texture3D<float4> VelocityField;
-SamplerState samplerVelocityField; // 線形補間(Bilinear)で滑らかに読み取るためのサンプラー
+SamplerState samplerVelocityField;
 
-float3 gridSize;      // グリッドサイズ (width, height, depth)
-float deltaTime;      // フレーム間の時間
-float particleSpeed;  // 粒子の移動スピード倍率
-float2 randomSeed;    // 毎フレーム変わる乱数シード
+float3 gridSize;
+float deltaTime;
+float particleSpeed;
+float2 randomSeed;
 
-// 簡易的な疑似乱数生成器
-float rand(float2 co) {
+// Emitter Sphereからの受け渡し変数（3Dの半径に対応）
+float3 emitterCenter;
+float3 emitterRadius;
+
+float rand(float2 co)
+{
     return frac(sin(dot(co.xy, float2(12.9898, 78.233))) * 43758.5453);
 }
 
@@ -29,41 +31,73 @@ void UpdateParticles(uint3 id : SV_DispatchThreadID)
     uint idx = id.x;
     Particle p = particles[idx];
 
-    // 1. 座標を 0.0 ~ 1.0 に正規化（テクスチャのUV座標にする）
-    float3 uvw = p.position / gridSize;
-
-    // 2. 流体の速度(RGB)をサンプリング
+    float3 uvw = p.pos0 / gridSize;
     float4 fluidData = VelocityField.SampleLevel(samplerVelocityField, uvw, 0);
     float3 vel = fluidData.xyz;
 
-    // 3. 粒子の更新
-    p.velocity = vel;
-    p.position += vel * particleSpeed * deltaTime;
-    p.life -= deltaTime;
-
-    // 4. 寿命が尽きた、または画面外に出た粒子のリスポーン処理
-    if (p.life < 0.0 || 
-        p.position.x > gridSize.x || p.position.x < 0.0 ||
-        p.position.y > gridSize.y || p.position.y < 0.0 ||
-        p.position.z > gridSize.z || p.position.z < 0.0)
+    // 【キルスイッチ】流速が極端に遅い場所（よどみ点など）に入ったら即座に消す
+    float speed = length(vel);
+    if (speed < 0.001)
     {
-        // 粒子のインデックス(idx)と毎フレームのシードを組み合わせ、3つの完全に独立した乱数を作る
-        float r1 = rand(randomSeed + float2(idx * 0.13, 0.45));
-        float r2 = rand(randomSeed + float2(idx * 0.71, 0.89));
-        float r3 = rand(float2(r1, r2));
-
-        // X方向：風洞の入り口（0 〜 4分の1）に優しく散らす
-        // Y方向、Z方向：0 〜 最大値 まで均等に100%ランダムに散らす
-        p.position = float3(
-            r3 * (gridSize.x * 0.25),
-            r1 * gridSize.y,
-            r2 * gridSize.z
-        );
-
-        // 寿命もランダム(1.0秒 ~ 4.0秒)
-        p.life = 1.0 + r3 * 3.0; 
+        p.life = -1.0;
     }
 
-    // バッファに書き戻す
+    p.velocity = vel;
+    p.pos0 += vel * particleSpeed * deltaTime;
+    p.life -= deltaTime;
+
+    // 【曲線のキモ】現在地(pos0)と1つ前の関節(pos1)の距離が「1.0」離れたら履歴をシフトする
+    if (distance(p.pos0, p.pos1) > 1.0)
+    {
+        p.pos4 = p.pos3;
+        p.pos3 = p.pos2;
+        p.pos2 = p.pos1;
+        p.pos1 = p.pos0;
+    }
+
+    // ==========================================
+    // 寿命が尽きた、または画面外に出た粒子のリスポーン処理
+    // ==========================================
+    if (p.life < 0.0 ||
+        p.pos0.x > gridSize.x || p.pos0.x < 0.0 ||
+        p.pos0.y > gridSize.y || p.pos0.y < 0.0 ||
+        p.pos0.z > gridSize.z || p.pos0.z < 0.0)
+    {
+        // 乱数を3つ生成
+        float r1 = rand(randomSeed + float2(idx * 0.1, 0.2));
+        float r2 = rand(randomSeed + float2(idx * 0.3, 0.4));
+        float r3 = rand(randomSeed + float2(idx * 0.5, 0.6));
+
+        // 半径1の完璧な単位球の内部座標を計算
+        float theta = r1 * 2.0 * 3.14159265;
+        float phi = acos(2.0 * r2 - 1.0);
+        float r = pow(r3, 1.0 / 3.0);
+
+        // 単位球の座標系（Unityに合わせて Y軸が上下の極になるように配置）
+        float3 dir = float3(
+            r * sin(phi) * cos(theta),
+            r * cos(phi),
+            r * sin(phi) * sin(theta)
+        );
+
+        // 真ん丸の座標に対して、LBMのセル比率の歪み（emitterRadius）を掛けて相殺する！
+        float3 offset = dir * emitterRadius;
+
+        float3 newPos = emitterCenter + offset;
+        
+        // 履歴をすべてリスポーン位置でリセット
+        p.pos0 = newPos;
+        p.pos1 = newPos;
+        p.pos2 = newPos;
+        p.pos3 = newPos;
+        p.pos4 = newPos;
+        
+        // 周囲の流速に自然に馴染ませるため、初速はゼロにする
+        p.velocity = float3(0.0, 0.0, 0.0);
+        
+        // 風洞を抜け切るための長い寿命
+        p.life = 15.0 + r1 * 5.0;
+    }
+
     particles[idx] = p;
 }

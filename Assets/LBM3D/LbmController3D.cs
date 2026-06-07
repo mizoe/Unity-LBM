@@ -2,191 +2,279 @@ using UnityEngine;
 
 public class LbmController3D : MonoBehaviour
 {
-    // C#側とHLSL側でデータ構造を完全に一致させる (12 + 12 + 4 = 28 bytes)
+    public enum DisplayMode { Cd_induced, Cp, Cpt, u, v, w }
+    [Header("Visualization")]
+    public DisplayMode displayMode = DisplayMode.u;
+    public float maxVal = 0.2f; // 色の最大値（正規化用）
+
+    [Header("LBM Settings")]
+    public int NX = 64;
+    public int NY = 64;
+    public int NZ = 32;
+    [Range(0.51f, 1.5f)] public float tau = 0.52f;
+    public float uInlet = 0.1f;
+
+    [Header("Scene References")]
+    public GameObject obstacleRoot;
+    public Transform emitterSphere; // パーティクルの発生源となるSphere
+
+    [Header("Compute Shaders")]
+    public ComputeShader lbmComputeShader;
+    public ComputeShader particleComputeShader;
+
+    [Header("Materials")]
+    public Material sliceMaterial;
+    public Material particleMaterial;
+
+    [Header("Particle Settings")]
+    public int numParticles = 10000;
+    public float particleSpeed = 10.0f;
+
+    private ComputeBuffer fOldBuffer;
+    private ComputeBuffer fNewBuffer;
+    private ComputeBuffer obstacleBuffer;
+    private ComputeBuffer particleBuffer;
+    private RenderTexture velocity3DTexture;
+
+    private int totalCells;
+    private Vector3 originPos;
+    private Vector3 domainSize = new Vector3(10f, 5f, 3f);
+
     struct Particle
     {
-        public Vector3 position;
+        public Vector3 pos0;
+        public Vector3 pos1;
+        public Vector3 pos2;
+        public Vector3 pos3;
+        public Vector3 pos4;
         public Vector3 velocity;
         public float life;
     }
 
-    [Header("Shader References")]
-    [SerializeField] private ComputeShader lbmSolver;
-    [SerializeField] private ComputeShader particleSolver;
-    [SerializeField] private Material particleMaterial;
-
-    [Header("Simulation Settings")]
-    [SerializeField] private int width = 64;
-    [SerializeField] private int height = 32;
-    [SerializeField] private int depth = 32;
-    [SerializeField] [Range(0.51f, 1.9f)] private float tau = 0.55f;
-
-    [Header("Flow & Obstacle")]
-    [SerializeField] private float initialVelocityX = 0.1f;
-    [SerializeField] private Vector3 obstaclePos = new Vector3(20, 16, 16);
-    [SerializeField] private float brushSize = 5.0f;
-
-    [Header("Particle Settings")]
-    [SerializeField] private int particleCount = 200000; // 20万パーティクル
-    [SerializeField] private float particleSpeed = 300.0f; // 描画上の移動速度
-
-    // バッファ類
-    private ComputeBuffer bufferIn, bufferOut, obstacleBuffer;
-    private ComputeBuffer particleBuffer;
-    private RenderTexture resultTexture3D;
-
-    private int kernelLbmStep, kernelAddObstacle, kernelUpdateParticles;
-
     void Start()
     {
-        // 1. カーネルの取得
-        kernelLbmStep = lbmSolver.FindKernel("LbmStep");
-        kernelAddObstacle = lbmSolver.FindKernel("AddObstacle");
-        kernelUpdateParticles = particleSolver.FindKernel("UpdateParticles");
+        totalCells = NX * NY * NZ;
+        originPos = transform.position;
 
-        // 2. 3Dテクスチャの生成（流体の風向き保存用）
-        resultTexture3D = new RenderTexture(width, height, 0, RenderTextureFormat.ARGBFloat);
-        resultTexture3D.dimension = UnityEngine.Rendering.TextureDimension.Tex3D;
-        resultTexture3D.volumeDepth = depth;
-        resultTexture3D.enableRandomWrite = true;
-        resultTexture3D.filterMode = FilterMode.Bilinear;
-        resultTexture3D.wrapMode = TextureWrapMode.Clamp;
-        resultTexture3D.Create();
-
-        // 3. 流体計算用バッファの確保
-        int totalCells = width * height * depth;
-        bufferIn = new ComputeBuffer(totalCells * 19, sizeof(float));
-        bufferOut = new ComputeBuffer(totalCells * 19, sizeof(float));
-        
-        obstacleBuffer = new ComputeBuffer(totalCells, sizeof(int));
-        obstacleBuffer.SetData(new int[totalCells]);
-
-        // D3Q19の初期データを投入
-        InitializeLbmData();
-
-        // 静的パラメータのセットと障害物の配置
-        lbmSolver.SetInt("width", width);
-        lbmSolver.SetInt("height", height);
-        lbmSolver.SetInt("depth", depth);
-        lbmSolver.SetTexture(kernelLbmStep, "Result", resultTexture3D);
-        
-        lbmSolver.SetVector("obstaclePos", obstaclePos);
-        lbmSolver.SetFloat("brushSize", brushSize);
-        lbmSolver.SetBuffer(kernelAddObstacle, "obstacles", obstacleBuffer);
-        lbmSolver.Dispatch(kernelAddObstacle, Mathf.CeilToInt(width/8f), Mathf.CeilToInt(height/8f), Mathf.CeilToInt(depth/8f));
-
-        // 4. パーティクル用バッファの初期化
-        particleBuffer = new ComputeBuffer(particleCount, 28);
-        Particle[] initialParticles = new Particle[particleCount];
-        for (int i = 0; i < particleCount; i++)
-        {
-            initialParticles[i].position = new Vector3(
-                Random.Range(0f, width),
-                Random.Range(0f, height),
-                Random.Range(0f, depth)
-            );
-            initialParticles[i].velocity = Vector3.zero;
-            initialParticles[i].life = Random.Range(0.0f, 4.0f);
-        }
-        particleBuffer.SetData(initialParticles);
-
-        if (particleMaterial != null)
-        {
-            particleMaterial.SetBuffer("particlesBuffer", particleBuffer);
-        }
+        InitializeFluid();
+        InitializeObstacles();
+        InitializeParticles();
     }
 
-    void InitializeLbmData()
+    void InitializeFluid()
     {
-        int totalCells = width * height * depth;
-        float[] initialData = new float[totalCells * 19];
+        int bufferSize = totalCells * 19;
+        float[] initialF = new float[bufferSize];
 
-        float[] w = {
-            1f / 3f,
-            1f / 18f, 1f / 18f, 1f / 18f, 1f / 18f, 1f / 18f, 1f / 18f,
-            1f / 36f, 1f / 36f, 1f / 36f, 1f / 36f, 1f / 36f, 1f / 36f, 1f / 36f, 1f / 36f, 1f / 36f, 1f / 36f, 1f / 36f, 1f / 36f
+        float[] w = new float[19] {
+            1f/3f, 1f/18f, 1f/18f, 1f/18f, 1f/18f, 1f/18f, 1f/18f,
+            1f/36f, 1f/36f, 1f/36f, 1f/36f, 1f/36f, 1f/36f, 1f/36f, 1f/36f, 1f/36f, 1f/36f, 1f/36f, 1f/36f
         };
 
-        Vector3Int[] c = {
-            new Vector3Int(0, 0, 0),
-            new Vector3Int(1, 0, 0), new Vector3Int(-1, 0, 0), new Vector3Int(0, 1, 0), new Vector3Int(0, -1, 0), new Vector3Int(0, 0, 1), new Vector3Int(0, 0, -1),
-            new Vector3Int(1, 1, 0), new Vector3Int(-1, -1, 0), new Vector3Int(1, -1, 0), new Vector3Int(-1, 1, 0),
-            new Vector3Int(1, 0, 1), new Vector3Int(-1, 0, -1), new Vector3Int(1, 0, -1), new Vector3Int(-1, 0, 1),
-            new Vector3Int(0, 1, 1), new Vector3Int(0, -1, -1), new Vector3Int(0, 1, -1), new Vector3Int(0, -1, 1)
-        };
+        int[] ex = { 0, 1, -1, 0, 0, 0, 0, 1, 1, -1, -1, 1, 1, -1, -1, 0, 0, 0, 0 };
 
-        float rho0 = 1.0f;
-        Vector3 u0 = new Vector3(initialVelocityX, 0f, 0f);
+        float u_sq = uInlet * uInlet;
 
-        for (int z = 0; z < depth; z++)
+        for (int z = 0; z < NZ; z++)
         {
-            for (int y = 0; y < height; y++)
+            for (int y = 0; y < NY; y++)
             {
-                for (int x = 0; x < width; x++)
+                for (int x = 0; x < NX; x++)
                 {
-                    float uSq = u0.x * u0.x + u0.y * u0.y + u0.z * u0.z;
-                    int gridIdx = (z * height * width) + (y * width) + x;
-
-                    for (int i = 0; i < 19; i++)
+                    for (int q = 0; q < 19; q++)
                     {
-                        float cu = c[i].x * u0.x + c[i].y * u0.y + c[i].z * u0.z;
-                        float feq = w[i] * rho0 * (1f + 3f * cu + 4.5f * cu * cu - 1.5f * uSq);
-
-                        int index = gridIdx * 19 + i;
-                        initialData[index] = feq;
+                        int idx = q + 19 * (x + NX * (y + NY * z));
+                        float edotu = ex[q] * uInlet;
+                        initialF[idx] = w[q] * (1.0f + 3.0f * edotu + 4.5f * edotu * edotu - 1.5f * u_sq);
                     }
                 }
             }
         }
 
-        bufferIn.SetData(initialData);
-        bufferOut.SetData(initialData);
+        fOldBuffer = new ComputeBuffer(bufferSize, sizeof(float));
+        fNewBuffer = new ComputeBuffer(bufferSize, sizeof(float));
+        fOldBuffer.SetData(initialF);
+        fNewBuffer.SetData(initialF);
+    }
+
+    void InitializeObstacles()
+    {
+        int[] obstacleMap = new int[totalCells];
+        if (obstacleRoot != null)
+        {
+            Vector3 cellSize = new Vector3(domainSize.x / NX, domainSize.y / NY, domainSize.z / NZ);
+            // ボクセル（セル）がすっぽり収まるくらいの極小の球の半径
+            float checkRadius = Mathf.Min(cellSize.x, cellSize.y, cellSize.z) * 0.5f;
+
+            for (int z = 0; z < NZ; z++)
+            {
+                for (int y = 0; y < NY; y++)
+                {
+                    for (int x = 0; x < NX; x++)
+                    {
+                        Vector3 cellPos = originPos + new Vector3((x + 0.5f) * cellSize.x, (y + 0.5f) * cellSize.y, (z + 0.5f) * cellSize.z);
+                        int index = x + y * NX + z * NX * NY;
+                        obstacleMap[index] = 0;
+
+                        // 球体で空間をサンプリングし、車体内部なら障害物とする
+                        Collider[] hitCols = Physics.OverlapSphere(cellPos, checkRadius);
+                        foreach (var hit in hitCols)
+                        {
+                            if (hit.transform.IsChildOf(obstacleRoot.transform))
+                            {
+                                obstacleMap[index] = 1;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        obstacleBuffer = new ComputeBuffer(totalCells, sizeof(int));
+        obstacleBuffer.SetData(obstacleMap);
+    }
+
+    void InitializeParticles()
+    {
+        velocity3DTexture = new RenderTexture(NX, NY, 0, RenderTextureFormat.ARGBFloat);
+        velocity3DTexture.dimension = UnityEngine.Rendering.TextureDimension.Tex3D;
+        velocity3DTexture.volumeDepth = NZ;
+        velocity3DTexture.enableRandomWrite = true;
+        velocity3DTexture.filterMode = FilterMode.Bilinear;
+        velocity3DTexture.Create();
+
+        particleBuffer = new ComputeBuffer(numParticles, 76);
+        Particle[] pArray = new Particle[numParticles];
+
+        // 実行直後に巨大な箱が発生するのを防ぐため、Sphereの位置を初期位置にする
+        Vector3 startGridPos = new Vector3(NX * 0.1f, NY * 0.5f, NZ * 0.5f);
+        if (emitterSphere != null)
+        {
+            Vector3 localPos = emitterSphere.position - originPos;
+            startGridPos = new Vector3(
+                (localPos.x / domainSize.x) * NX,
+                (localPos.y / domainSize.y) * NY,
+                (localPos.z / domainSize.z) * NZ
+            );
+        }
+
+        for (int i = 0; i < numParticles; i++)
+        {
+            pArray[i].pos0 = startGridPos;
+            pArray[i].pos1 = startGridPos;
+            pArray[i].pos2 = startGridPos;
+            pArray[i].pos3 = startGridPos;
+            pArray[i].pos4 = startGridPos;
+            pArray[i].velocity = Vector3.zero;
+            // 最初からバラけさせるために寿命をランダム化
+            pArray[i].life = Random.Range(0.0f, 15.0f);
+        }
+        particleBuffer.SetData(pArray);
     }
 
     void Update()
     {
-        // 1. 流体の計算 (LBM)
-        lbmSolver.SetFloat("omega", 1.0f / tau);
-        lbmSolver.SetFloat("inletVelocity", initialVelocityX);
-        lbmSolver.SetBuffer(kernelLbmStep, "f_in", bufferIn);
-        lbmSolver.SetBuffer(kernelLbmStep, "f_out", bufferOut);
-        lbmSolver.SetBuffer(kernelLbmStep, "obstacles", obstacleBuffer);
-        
-        lbmSolver.Dispatch(kernelLbmStep, Mathf.CeilToInt(width/8f), Mathf.CeilToInt(height/8f), Mathf.CeilToInt(depth/8f));
+        // ============================================
+        // [1] LBMの計算
+        // ============================================
+        lbmComputeShader.SetInt("NX", NX);
+        lbmComputeShader.SetInt("NY", NY);
+        lbmComputeShader.SetInt("NZ", NZ);
+        lbmComputeShader.SetFloat("tau", tau);
+        lbmComputeShader.SetFloat("u_inlet", uInlet);
 
-        ComputeBuffer temp = bufferIn;
-        bufferIn = bufferOut;
-        bufferOut = temp;
+        int kernelCollide = lbmComputeShader.FindKernel("CollideAndStream");
+        lbmComputeShader.SetBuffer(kernelCollide, "f_old", fOldBuffer);
+        lbmComputeShader.SetBuffer(kernelCollide, "f_new", fNewBuffer);
+        lbmComputeShader.SetBuffer(kernelCollide, "obstacles", obstacleBuffer);
+        lbmComputeShader.SetTexture(kernelCollide, "VelocityField", velocity3DTexture);
 
-        // 2. 粒子の計算 (Particle Solver)
-        particleSolver.SetVector("gridSize", new Vector3(width, height, depth));
-        particleSolver.SetFloat("deltaTime", Time.deltaTime);
-        particleSolver.SetFloat("particleSpeed", particleSpeed);
-        particleSolver.SetVector("randomSeed", new Vector2(Random.value, Random.value));
-        
-        particleSolver.SetTexture(kernelUpdateParticles, "VelocityField", resultTexture3D);
-        particleSolver.SetBuffer(kernelUpdateParticles, "particles", particleBuffer);
-        
-        int particleThreadGroups = Mathf.CeilToInt(particleCount / 256f);
-        particleSolver.Dispatch(kernelUpdateParticles, particleThreadGroups, 1, 1);
-    }
+        int threadsX = Mathf.CeilToInt(NX / 8f);
+        int threadsY = Mathf.CeilToInt(NY / 8f);
+        int threadsZ = Mathf.CeilToInt(NZ / 8f);
+        lbmComputeShader.Dispatch(kernelCollide, threadsX, threadsY, threadsZ);
 
-    // GPUに直接描画命令を出す
-    void OnRenderObject()
-    {
-        if (particleMaterial != null && particleBuffer != null)
+        ComputeBuffer temp = fOldBuffer;
+        fOldBuffer = fNewBuffer;
+        fNewBuffer = temp;
+
+        // ============================================
+        // [2] パーティクルの計算
+        // ============================================
+        int kernelUpdate = particleComputeShader.FindKernel("UpdateParticles");
+        particleComputeShader.SetBuffer(kernelUpdate, "particles", particleBuffer);
+        particleComputeShader.SetTexture(kernelUpdate, "VelocityField", velocity3DTexture);
+        particleComputeShader.SetVector("gridSize", new Vector3(NX, NY, NZ));
+        particleComputeShader.SetFloat("deltaTime", Time.deltaTime);
+        particleComputeShader.SetFloat("particleSpeed", particleSpeed);
+        particleComputeShader.SetVector("randomSeed", new Vector2(Random.value, Random.value));
+
+        // Sphereの位置と「3Dセル比率を考慮した半径」を計算して送る
+        if (emitterSphere != null)
         {
-            particleMaterial.SetPass(0);
-            Graphics.DrawProceduralNow(MeshTopology.Points, particleCount);
+            Vector3 localPos = emitterSphere.position - originPos;
+            Vector3 gridCenter = new Vector3(
+                (localPos.x / domainSize.x) * NX,
+                (localPos.y / domainSize.y) * NY,
+                (localPos.z / domainSize.z) * NZ
+            );
+
+            // ワールドのスケールを元に、XYZそれぞれのグリッド数としての半径を算出
+            float worldRadius = emitterSphere.localScale.x * 0.5f;
+            Vector3 gridRadius3D = new Vector3(
+                (worldRadius / domainSize.x) * NX,
+                (worldRadius / domainSize.y) * NY,
+                (worldRadius / domainSize.z) * NZ
+            );
+
+            particleComputeShader.SetVector("emitterCenter", gridCenter);
+            particleComputeShader.SetVector("emitterRadius", gridRadius3D);
+        }
+        else
+        {
+            particleComputeShader.SetVector("emitterCenter", new Vector3(NX * 0.5f, NY * 0.5f, NZ * 0.5f));
+            particleComputeShader.SetVector("emitterRadius", new Vector3(5.0f, 5.0f, 5.0f));
+        }
+
+        int pGroups = Mathf.CeilToInt(numParticles / 256f);
+        particleComputeShader.Dispatch(kernelUpdate, pGroups, 1, 1);
+
+        // ============================================
+        // [3] マテリアルへの転送・描画
+        // ============================================
+        if (sliceMaterial != null && velocity3DTexture != null)
+        {
+            sliceMaterial.SetTexture("_VelocityField", velocity3DTexture);
+        }
+
+        if (sliceMaterial != null)
+        {
+            sliceMaterial.SetInt("_Mode", (int)displayMode);
+            sliceMaterial.SetFloat("_MaxVal", maxVal);
+            sliceMaterial.SetFloat("_Uinlet", uInlet);
+            sliceMaterial.SetVector("_DomainOrigin", originPos);
+            sliceMaterial.SetVector("_DomainSize", domainSize);
+        }
+
+        if (particleMaterial != null)
+        {
+            particleMaterial.SetBuffer("particles", particleBuffer);
+            particleMaterial.SetVector("_GridSize", new Vector3(NX, NY, NZ));
+            particleMaterial.SetVector("_DomainSize", domainSize);
+            particleMaterial.SetVector("_Origin", originPos);
+
+            Bounds bounds = new Bounds(originPos + domainSize * 0.5f, domainSize);
+            Graphics.DrawProcedural(particleMaterial, bounds, MeshTopology.Triangles, 24, numParticles);
         }
     }
 
     void OnDestroy()
     {
-        if (bufferIn != null) bufferIn.Release();
-        if (bufferOut != null) bufferOut.Release();
+        if (fOldBuffer != null) fOldBuffer.Release();
+        if (fNewBuffer != null) fNewBuffer.Release();
         if (obstacleBuffer != null) obstacleBuffer.Release();
         if (particleBuffer != null) particleBuffer.Release();
-        if (resultTexture3D != null) resultTexture3D.Release();
+        if (velocity3DTexture != null) velocity3DTexture.Release();
     }
 }
