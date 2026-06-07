@@ -1,0 +1,69 @@
+#pragma kernel UpdateParticles
+
+struct Particle {
+    float3 position;
+    float3 velocity;
+    float life;
+};
+
+// 粒子のデータを読み書きするバッファ
+RWStructuredBuffer<Particle> particles;
+
+// LbmSolver3Dが書き込んだ流体データ
+Texture3D<float4> VelocityField;
+SamplerState samplerVelocityField; // 線形補間(Bilinear)で滑らかに読み取るためのサンプラー
+
+float3 gridSize;      // グリッドサイズ (width, height, depth)
+float deltaTime;      // フレーム間の時間
+float particleSpeed;  // 粒子の移動スピード倍率
+float2 randomSeed;    // 毎フレーム変わる乱数シード
+
+// 簡易的な疑似乱数生成器
+float rand(float2 co) {
+    return frac(sin(dot(co.xy, float2(12.9898, 78.233))) * 43758.5453);
+}
+
+[numthreads(256, 1, 1)]
+void UpdateParticles(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    Particle p = particles[idx];
+
+    // 1. 座標を 0.0 ~ 1.0 に正規化（テクスチャのUV座標にする）
+    float3 uvw = p.position / gridSize;
+
+    // 2. 流体の速度(RGB)をサンプリング
+    float4 fluidData = VelocityField.SampleLevel(samplerVelocityField, uvw, 0);
+    float3 vel = fluidData.xyz;
+
+    // 3. 粒子の更新
+    p.velocity = vel;
+    p.position += vel * particleSpeed * deltaTime;
+    p.life -= deltaTime;
+
+    // 4. 寿命が尽きた、または画面外に出た粒子のリスポーン処理
+    if (p.life < 0.0 || 
+        p.position.x > gridSize.x || p.position.x < 0.0 ||
+        p.position.y > gridSize.y || p.position.y < 0.0 ||
+        p.position.z > gridSize.z || p.position.z < 0.0)
+    {
+        // 粒子のインデックス(idx)と毎フレームのシードを組み合わせ、3つの完全に独立した乱数を作る
+        float r1 = rand(randomSeed + float2(idx * 0.13, 0.45));
+        float r2 = rand(randomSeed + float2(idx * 0.71, 0.89));
+        float r3 = rand(float2(r1, r2));
+
+        // X方向：風洞の入り口（0 〜 4分の1）に優しく散らす
+        // Y方向、Z方向：0 〜 最大値 まで均等に100%ランダムに散らす
+        p.position = float3(
+            r3 * (gridSize.x * 0.25),
+            r1 * gridSize.y,
+            r2 * gridSize.z
+        );
+
+        // 寿命もランダム(1.0秒 ~ 4.0秒)
+        p.life = 1.0 + r3 * 3.0; 
+    }
+
+    // バッファに書き戻す
+    particles[idx] = p;
+}

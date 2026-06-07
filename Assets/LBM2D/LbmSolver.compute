@@ -1,0 +1,117 @@
+﻿#pragma kernel LbmStep
+#pragma kernel AddObstacle
+
+uint width;
+uint height;
+float omega;
+
+// D2Q9の方向ベクトル
+static const int2 c[9] = {
+    int2(0, 0), int2(1, 0), int2(0, 1), int2(-1, 0), int2(0, -1),
+    int2(1, 1), int2(-1, 1), int2(-1, -1), int2(1, -1)
+};
+
+// D2Q9の重み係数
+static const float w[9] = {
+    4.0 / 9.0,
+    1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0,
+    1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0
+};
+
+// 反対方向を示すインデックス
+static const int inv[9] = {0, 3, 4, 1, 2, 7, 8, 5, 6};
+
+StructuredBuffer<float> f_in;
+RWStructuredBuffer<float> f_out;
+RWTexture2D<float4> Result;
+
+RWStructuredBuffer<int> obstacles;
+float2 mousePos;
+float brushSize;
+float inletVelocity; // 風洞の入り口の流速
+
+uint GetIndex(uint x, uint y, uint i) {
+    return (y * width + x) * 9 + i;
+}
+
+[numthreads(8, 8, 1)]
+void AddObstacle(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= width || id.y >= height) return;
+    
+    float dist = distance((float2)id.xy, mousePos);
+    if (dist < brushSize) {
+        obstacles[id.y * width + id.x] = 1;
+    }
+}
+
+[numthreads(8, 8, 1)]
+void LbmStep(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= width || id.y >= height) return;
+
+    int x = id.x;
+    int y = id.y;
+
+    // 自分が「壁」なら、計算せずに透明色（描画用）を出力して終了
+    if (obstacles[y * width + x] == 1) {
+        Result[id.xy] = float4(0.0, 0.0, 0.0, 0.0);
+        return;
+    }
+
+    float f_local[9];
+    float rho = 0.0;
+    float2 u = float2(0.0, 0.0);
+
+    // 1. ストリーミング (Streaming) - Pull方式 + バウンスバック
+    for (int i = 0; i < 9; i++) {
+        int nx = (x - c[i].x + width) % width;
+        int ny = (y - c[i].y + height) % height;
+
+        // 隣のマスが「壁」の場合は、跳ね返ってきた自分自身の粒子（反対方向）を受け取る
+        if (obstacles[ny * width + nx] == 1) {
+            f_local[i] = f_in[GetIndex(x, y, inv[i])];
+        } else {
+            f_local[i] = f_in[GetIndex(nx, ny, i)];
+        }
+
+        rho += f_local[i];
+        u.x += f_local[i] * c[i].x;
+        u.y += f_local[i] * c[i].y;
+    }
+
+    // 速度 u の算出
+    if (rho > 0.0) {
+        u /= rho;
+    }
+
+    // 2. 衝突 (Collision) - BGK近似
+    float u_sq = u.x * u.x + u.y * u.y;
+
+    for (int j = 0; j < 9; j++) {
+        float cu = c[j].x * u.x + c[j].y * u.y;
+        float feq = w[j] * rho * (1.0 + 3.0 * cu + 4.5 * cu * cu - 1.5 * u_sq);
+
+        f_out[GetIndex(x, y, j)] = f_local[j] - omega * (f_local[j] - feq);
+    }
+
+    // ==========================================
+    // 風洞の入り口（Inlet Boundary Condition）
+    // ==========================================
+    // 左端のマスは、強制的に右向きの新鮮な流体で上書きし続ける
+    if (x == 0) {
+        float rho0 = 1.0;
+        float2 u0 = float2(inletVelocity, 0.0);
+        float u_sq0 = u0.x * u0.x + u0.y * u0.y;
+
+        for (int k = 0; k < 9; k++) {
+            float cu = c[k].x * u0.x + c[k].y * u0.y;
+            f_out[GetIndex(x, y, k)] = w[k] * rho0 * (1.0 + 3.0 * cu + 4.5 * cu * cu - 1.5 * u_sq0);
+        }
+        u = u0; // 描画用の速度も更新
+        rho = rho0;
+    }
+
+    // 3. 描画用の結果出力
+    Result[id.xy] = float4(u.x, u.y, rho, 1.0);
+}

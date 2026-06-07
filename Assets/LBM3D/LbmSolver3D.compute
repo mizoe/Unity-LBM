@@ -1,0 +1,129 @@
+﻿#pragma kernel LbmStep
+#pragma kernel AddObstacle
+
+uint width;
+uint height;
+uint depth; // ← 3D用に追加
+float omega;
+
+// D3Q19の方向ベクトル (int3に変更)
+static const int3 c[19] = {
+    int3(0, 0, 0),
+    int3(1, 0, 0), int3(-1, 0, 0), int3(0, 1, 0), int3(0, -1, 0), int3(0, 0, 1), int3(0, 0, -1),
+    int3(1, 1, 0), int3(-1, -1, 0), int3(1, -1, 0), int3(-1, 1, 0),
+    int3(1, 0, 1), int3(-1, 0, -1), int3(1, 0, -1), int3(-1, 0, 1),
+    int3(0, 1, 1), int3(0, -1, -1), int3(0, 1, -1), int3(0, -1, 1)
+};
+
+// D3Q19の重み係数
+static const float w[19] = {
+    1.0 / 3.0,
+    1.0 / 18.0, 1.0 / 18.0, 1.0 / 18.0, 1.0 / 18.0, 1.0 / 18.0, 1.0 / 18.0,
+    1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0
+};
+
+// 反対方向を示すインデックス
+static const int inv[19] = {
+    0, 2, 1, 4, 3, 6, 5, 8, 7, 10, 9, 12, 11, 14, 13, 16, 15, 18, 17
+};
+
+StructuredBuffer<float> f_in;
+RWStructuredBuffer<float> f_out;
+
+// 結果を「3Dテクスチャ」として出力！ (VFX Graphで読み込むため)
+RWTexture3D<float4> Result;
+
+RWStructuredBuffer<int> obstacles;
+float3 obstaclePos; // ← float3に変更
+float brushSize;
+float inletVelocity;
+
+// 3D空間の1次元配列インデックス計算
+uint GetGridIndex(uint x, uint y, uint z) {
+    return (z * height * width) + (y * width) + x;
+}
+
+uint GetIndex(uint x, uint y, uint z, uint i) {
+    return GetGridIndex(x, y, z) * 19 + i;
+}
+
+// 3Dブロック単位でスレッドを割り当て
+[numthreads(8, 8, 8)]
+void AddObstacle(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= width || id.y >= height || id.z >= depth) return;
+    
+    // 指定座標（球体）に壁を配置
+    float dist = distance((float3)id.xyz, obstaclePos);
+    if (dist < brushSize) {
+        obstacles[GetGridIndex(id.x, id.y, id.z)] = 1;
+    }
+}
+
+[numthreads(8, 8, 8)]
+void LbmStep(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= width || id.y >= height || id.z >= depth) return;
+
+    int x = id.x;
+    int y = id.y;
+    int z = id.z;
+    uint gridIdx = GetGridIndex(x, y, z);
+
+    if (obstacles[gridIdx] == 1) {
+        Result[id.xyz] = float4(0.0, 0.0, 0.0, 0.0);
+        return;
+    }
+
+    float f_local[19];
+    float rho = 0.0;
+    float3 u = float3(0.0, 0.0, 0.0); // ← float3に変更
+
+    // 1. ストリーミング
+    for (int i = 0; i < 19; i++) {
+        int nx = (x - c[i].x + width) % width;
+        int ny = (y - c[i].y + height) % height;
+        int nz = (z - c[i].z + depth) % depth;
+
+        if (obstacles[GetGridIndex(nx, ny, nz)] == 1) {
+            f_local[i] = f_in[GetIndex(x, y, z, inv[i])];
+        } else {
+            f_local[i] = f_in[GetIndex(nx, ny, nz, i)];
+        }
+
+        rho += f_local[i];
+        u.x += f_local[i] * c[i].x;
+        u.y += f_local[i] * c[i].y;
+        u.z += f_local[i] * c[i].z;
+    }
+
+    if (rho > 0.0) {
+        u /= rho;
+    }
+
+    // 2. 衝突
+    float u_sq = u.x * u.x + u.y * u.y + u.z * u.z;
+
+    for (int j = 0; j < 19; j++) {
+        float cu = c[j].x * u.x + c[j].y * u.y + c[j].z * u.z;
+        float feq = w[j] * rho * (1.0 + 3.0 * cu + 4.5 * cu * cu - 1.5 * u_sq);
+        f_out[GetIndex(x, y, z, j)] = f_local[j] - omega * (f_local[j] - feq);
+    }
+
+    // 3. 風洞の入り口
+    if (x == 0) {
+        float rho0 = 1.0;
+        float3 u0 = float3(inletVelocity, 0.0, 0.0);
+        float u_sq0 = u0.x * u0.x + u0.y * u0.y + u0.z * u0.z;
+
+        for (int k = 0; k < 19; k++) {
+            float cu = c[k].x * u0.x + c[k].y * u0.y + c[k].z * u0.z;
+            f_out[GetIndex(x, y, z, k)] = w[k] * rho0 * (1.0 + 3.0 * cu + 4.5 * cu * cu - 1.5 * u_sq0);
+        }
+        u = u0;
+        rho = rho0;
+    }
+
+    // VFX Graphに渡すため、RGBに速度XYZを、Aに密度を書き込む
+    Result[id.xyz] = float4(u.x, u.y, u.z, rho);
+}
