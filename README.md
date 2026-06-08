@@ -160,3 +160,22 @@ $$\mathbf{u} = \frac{1}{\rho} \sum_{i} f_i \mathbf{e}_i$$
 Computed directly using the ideal gas equation of state for lattices, where $c_s = 1/\sqrt{3}$ is the lattice speed of sound:
 
 $$p = \rho c_s^2 = \frac{\rho}{3}$$
+
+
+## References
+
+The implementation of the Lattice Boltzmann Method and the underlying physics models in this project are based on the following foundational literature:
+
+1. **Foundational Lattice Models (D2Q9 / D3Q19)**
+   * Qian, Y. H., d'Humières, D., & Lallemand, P. (1992). *Lattice BGK Models for Navier-Stokes Equation*. Europhysics Letters (EPL), 17(6), 479-484. 
+   *(The original paper that introduced the D2Q9, D3Q15, D3Q19, and D3Q27 lattice structures used in modern CFD).*
+
+2. **BGK Collision Operator**
+   * Bhatnagar, P. L., Gross, E. P., & Krook, M. (1954). *A Model for Collision Processes in Gases. I. Small Amplitude Processes in Charged and Neutral One-Component Systems*. Physical Review, 94(3), 511-525.
+   *(The foundational paper defining the BGK relaxation time approximation used in the collision phase).*
+
+3. **Modern LBM Implementation & GPU Optimization**
+   * Krüger, T., Kusumaatmaja, H., Kuzmin, A., Shardt, O., Silva, G., & Viggen, E. M. (2017). *The Lattice Boltzmann Method: Principles and Practice*. Springer International Publishing.
+   *(The modern definitive textbook for implementing LBM, highly recommended for understanding boundary conditions and algorithmic optimization).*
+   * Succi, S. (2001). *The Lattice Boltzmann Equation: For Fluid Dynamics and Beyond*. Oxford University Press.
+   
