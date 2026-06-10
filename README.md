@@ -58,13 +58,14 @@ Assets/
 │   ├── LbmParticle_Mat.mat         # Material optimized for 3D particle visualization
 │   └── Slice_Mat.mat               # Material using SliceShader for contour visualization
 │
-├── Scenes/
-│   └── SampleScene.unity           # Pre-configured scene with togglable 2D/3D simulator rigs
-├── Documents/
-│   ├── Lbm2D.mp4                   # Video demo of the 2D solver
-│   ├── Lbm3D.mp4                   # Video demo of the 3D solver
-│   └── Lbm3D_Wagon.mp4             # Video demo of the 3D Car/Wagon Simulation
-└── README.md
+Scenes/
+├── SampleScene.unity           # Pre-configured scene with togglable 2D/3D simulator rigs
+Documents/
+├── Lbm2D.mp4                   # Video demo of the 2D solver
+├── Lbm3D.mp4                   # Video demo of the 3D solver
+├── Lbm3D_Wagon.mp4             # Video demo of the 3D Car/Wagon Simulation
+|
+README.md
 
 ```
 
