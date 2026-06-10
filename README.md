@@ -5,6 +5,8 @@ A lightweight, high-performance 2D/3D fluid simulation prototype implemented in 
 ## Video Demonstrations
 
 Below are the real-time simulation results for both 2D and 3D solvers. You can play them directly inside GitHub.
+### Car/Wagon Simulation (D3Q19)
+https://github.com/user-attachments/assets/df158f0c-72f3-4621-9876-ee2f7bba85e1
 
 ### 2D Simulation (D2Q9)
 
@@ -14,9 +16,6 @@ Below are the real-time simulation results for both 2D and 3D solvers. You can p
 
 [https://github.com/user-attachments/assets/56ee213d-de90-494f-a86e-92534bc4822f](https://github.com/user-attachments/assets/56ee213d-de90-494f-a86e-92534bc4822f)
 
-### Car/Wagon Simulation (D3Q19)
-
-[https://github.com/user-attachments/assets/108a95ae-5880-4165-b278-db784e424b51](https://github.com/user-attachments/assets/108a95ae-5880-4165-b278-db784e424b51)
 
 ---
 
